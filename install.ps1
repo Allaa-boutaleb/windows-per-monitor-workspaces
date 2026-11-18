@@ -10,6 +10,7 @@ param(
     [string]$RuntimeArchivePath,
     [string]$RuntimeArchiveSha256 = '43522AA3122A57784AC5DB30ABF85C2244475C36ACD7796E2C993355F9E926AE',
     [string]$StartupDirectory = ([Environment]::GetFolderPath('Startup')),
+    [string]$RecoveryShortcutDirectory = ([Environment]::GetFolderPath('Programs')),
     [ValidateRange(1, 10)]
     [int]$DownloadRetryCount = 3,
     [switch]$ForceStartupFallback,
@@ -22,6 +23,11 @@ $ErrorActionPreference = 'Stop'
 
 $scriptName = 'IndependentMonitorWorkspaces.ahk'
 $shortcutName = 'Independent Monitor Workspaces.lnk'
+$recoveryShortcutName = 'Independent Monitor Workspaces Recovery Hotkey 2.lnk'
+$legacyRecoveryShortcutNames = @(
+    'Independent Monitor Workspaces Recovery.lnk',
+    'Independent Monitor Workspaces Recovery Hotkey.lnk'
+)
 $fallbackName = 'Independent Monitor Workspaces.cmd'
 $parentDirectory = Split-Path -Parent $InstallRoot
 if (-not $parentDirectory) {
@@ -35,6 +41,10 @@ $startupBackupRoot = Join-Path $parentDirectory ('.imw-startup-' + $transactionI
 $stagedScript = Join-Path $stagingRoot $scriptName
 $installedScript = Join-Path $InstallRoot $scriptName
 $shortcutPath = Join-Path $StartupDirectory $shortcutName
+$recoveryShortcutPath = Join-Path $RecoveryShortcutDirectory $recoveryShortcutName
+$legacyRecoveryShortcutPaths = @($legacyRecoveryShortcutNames | ForEach-Object {
+    Join-Path $RecoveryShortcutDirectory $_
+})
 $fallbackStartupPath = Join-Path $StartupDirectory $fallbackName
 $runtimeWasBundled = -not [bool]$AutoHotkeyPath
 $installedRuntime = Join-Path $InstallRoot 'runtime\AutoHotkey.exe'
@@ -146,10 +156,19 @@ function Get-WorkspaceProcesses {
     param([Parameter(Mandatory = $true)][string]$ScriptPath)
 
     $comparisonPath = [IO.Path]::GetFullPath($ScriptPath)
+    $comparisonPaths = @($comparisonPath)
+    if (Test-Path -LiteralPath $comparisonPath) {
+        try {
+            $physicalPath = Resolve-PhysicalFilePath -Path $comparisonPath
+            if ($physicalPath -ne $comparisonPath) { $comparisonPaths += $physicalPath }
+        } catch { }
+    }
     return @(Get-CimInstance Win32_Process -Filter "Name LIKE 'AutoHotkey%.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine.IndexOf($comparisonPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $commandLine = $_.CommandLine
+            $commandLine -and @($comparisonPaths | Where-Object {
+                $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            }).Count -gt 0
         })
 }
 
@@ -202,25 +221,52 @@ function Stop-WorkspaceScript {
 }
 
 function Backup-StartupEntries {
-    New-Item -ItemType Directory -Path $startupBackupRoot -Force | Out-Null
+    $startupBackupDirectory = Join-Path $startupBackupRoot 'startup'
+    $recoveryBackupDirectory = Join-Path $startupBackupRoot 'recovery'
+    New-Item -ItemType Directory -Path $startupBackupDirectory, $recoveryBackupDirectory -Force | Out-Null
     foreach ($path in @($shortcutPath, $fallbackStartupPath)) {
         if (Test-Path -LiteralPath $path) {
-            Copy-Item -LiteralPath $path -Destination (Join-Path $startupBackupRoot ([IO.Path]::GetFileName($path))) -Force
+            Copy-Item -LiteralPath $path -Destination (Join-Path $startupBackupDirectory ([IO.Path]::GetFileName($path))) -Force
+        }
+    }
+    if (Test-Path -LiteralPath $recoveryShortcutPath) {
+        Copy-Item -LiteralPath $recoveryShortcutPath -Destination (Join-Path $recoveryBackupDirectory $recoveryShortcutName) -Force
+    }
+    foreach ($legacyPath in $legacyRecoveryShortcutPaths) {
+        if (Test-Path -LiteralPath $legacyPath) {
+            Copy-Item -LiteralPath $legacyPath -Destination (Join-Path $recoveryBackupDirectory ([IO.Path]::GetFileName($legacyPath))) -Force
         }
     }
 }
 
 function Remove-StartupEntries {
+    param([switch]$PreserveRecovery)
     Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fallbackStartupPath -Force -ErrorAction SilentlyContinue
+    if (-not $PreserveRecovery) {
+        Remove-Item -LiteralPath $recoveryShortcutPath -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($legacyPath in $legacyRecoveryShortcutPaths) {
+        Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Restore-StartupEntries {
     Remove-StartupEntries
     if (-not (Test-Path -LiteralPath $startupBackupRoot)) { return }
-    foreach ($item in Get-ChildItem -LiteralPath $startupBackupRoot -File) {
+    $startupBackupDirectory = Join-Path $startupBackupRoot 'startup'
+    if (Test-Path -LiteralPath $startupBackupDirectory) {
         New-Item -ItemType Directory -Path $StartupDirectory -Force | Out-Null
-        Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $StartupDirectory $item.Name) -Force
+        foreach ($item in Get-ChildItem -LiteralPath $startupBackupDirectory -File) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $StartupDirectory $item.Name) -Force
+        }
+    }
+    $recoveryBackupDirectory = Join-Path $startupBackupRoot 'recovery'
+    if (Test-Path -LiteralPath $recoveryBackupDirectory) {
+        New-Item -ItemType Directory -Path $RecoveryShortcutDirectory -Force | Out-Null
+        foreach ($item in Get-ChildItem -LiteralPath $recoveryBackupDirectory -File) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $RecoveryShortcutDirectory $item.Name) -Force
+        }
     }
 }
 
@@ -261,7 +307,7 @@ namespace IndependentMonitorWorkspaces {
     }
 
     public static class ShellShortcut {
-        public static void Create(string shortcutPath, string targetPath, string arguments, string workingDirectory, string description) {
+        public static void Create(string shortcutPath, string targetPath, string arguments, string workingDirectory, string description, short hotkey) {
             object linkObject = new ShellLinkObject();
             try {
                 IShellLinkW link = (IShellLinkW)linkObject;
@@ -269,6 +315,7 @@ namespace IndependentMonitorWorkspaces {
                 link.SetArguments(arguments);
                 link.SetWorkingDirectory(workingDirectory);
                 link.SetDescription(description);
+                link.SetHotkey(hotkey);
                 link.SetShowCmd(1);
                 ((IPersistFile)linkObject).Save(shortcutPath, true);
             } finally {
@@ -280,15 +327,80 @@ namespace IndependentMonitorWorkspaces {
 "@
 }
 
+function Resolve-PhysicalFilePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not ('IndependentMonitorWorkspaces.PhysicalPath' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace IndependentMonitorWorkspaces {
+    public static class PhysicalPath {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            IntPtr file, StringBuilder path, uint pathLength, uint flags);
+
+        public static string Resolve(string path) {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete)) {
+                StringBuilder result = new StringBuilder(32768);
+                uint length = GetFinalPathNameByHandle(
+                    stream.SafeFileHandle.DangerousGetHandle(), result,
+                    (uint)result.Capacity, 0);
+                if (length == 0 || length >= result.Capacity) {
+                    throw new System.ComponentModel.Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not resolve the physical file path.");
+                }
+                string finalPath = result.ToString();
+                if (finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                    return @"\\" + finalPath.Substring(8);
+                if (finalPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                    return finalPath.Substring(4);
+                return finalPath;
+            }
+        }
+    }
+}
+"@
+    }
+    return [IndependentMonitorWorkspaces.PhysicalPath]::Resolve($Path)
+}
+
+function Test-RecoveryShortcutCurrent {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimePath,
+        [Parameter(Mandatory = $true)][string]$ScriptPath
+    )
+    if (-not (Test-Path -LiteralPath $recoveryShortcutPath)) { return $false }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($recoveryShortcutPath)
+        return $shortcut.TargetPath -ieq $RuntimePath -and
+            $shortcut.Arguments -ieq ('"' + $ScriptPath + '"') -and
+            $shortcut.Hotkey.ToUpperInvariant() -eq 'ALT+CTRL+SHIFT+R'
+    } catch {
+        return $false
+    }
+}
+
 function Install-StartupEntry {
     param(
         [Parameter(Mandatory = $true)][string]$RuntimePath,
         [Parameter(Mandatory = $true)][string]$ScriptPath
     )
 
-    Remove-StartupEntries
-    if ($NoStartup) { return }
-    New-Item -ItemType Directory -Path $StartupDirectory -Force | Out-Null
+    if ($NoStartup) {
+        Remove-StartupEntries
+        return
+    }
+    New-Item -ItemType Directory -Path $StartupDirectory, $RecoveryShortcutDirectory -Force | Out-Null
+    $RuntimePath = Resolve-PhysicalFilePath -Path $RuntimePath
+    $ScriptPath = Resolve-PhysicalFilePath -Path $ScriptPath
+    $preserveRecovery = -not $ForceStartupFallback -and
+        (Test-RecoveryShortcutCurrent -RuntimePath $RuntimePath -ScriptPath $ScriptPath)
+    Remove-StartupEntries -PreserveRecovery:$preserveRecovery
 
     if (-not $ForceStartupFallback) {
         try {
@@ -299,22 +411,44 @@ function Install-StartupEntry {
             $shortcut.WorkingDirectory = $InstallRoot
             $shortcut.Description = 'Independent per-monitor workspaces for Windows 11'
             $shortcut.Save()
-            if (Test-Path -LiteralPath $shortcutPath) { return }
+
+            if (-not $preserveRecovery) {
+                $recoveryShortcut = $shell.CreateShortcut($recoveryShortcutPath)
+                $recoveryShortcut.TargetPath = $RuntimePath
+                $recoveryShortcut.Arguments = '"' + $ScriptPath + '"'
+                $recoveryShortcut.WorkingDirectory = $InstallRoot
+                $recoveryShortcut.Description = 'Launch or restart Independent Monitor Workspaces'
+                $recoveryShortcut.Hotkey = 'CTRL+ALT+SHIFT+R'
+                $recoveryShortcut.Save()
+            }
+            if ((Test-Path -LiteralPath $shortcutPath) -and
+                (Test-Path -LiteralPath $recoveryShortcutPath)) { return }
         } catch {
-            Write-Warning "WScript could not create the Startup shortcut; using the native Windows Shell API. $($_.Exception.Message)"
+            Write-Warning "WScript could not create the workspace shortcuts; using the native Windows Shell API. $($_.Exception.Message)"
         }
     }
 
+    Remove-StartupEntries
     Initialize-NativeShortcut
     [IndependentMonitorWorkspaces.ShellShortcut]::Create(
         $shortcutPath,
         $RuntimePath,
         ('"' + $ScriptPath + '"'),
         $InstallRoot,
-        'Independent per-monitor workspaces for Windows 11'
+        'Independent per-monitor workspaces for Windows 11',
+        [int16]0
     )
-    if (-not (Test-Path -LiteralPath $shortcutPath)) {
-        throw 'Windows did not create the Startup shortcut.'
+    [IndependentMonitorWorkspaces.ShellShortcut]::Create(
+        $recoveryShortcutPath,
+        $RuntimePath,
+        ('"' + $ScriptPath + '"'),
+        $InstallRoot,
+        'Launch or restart Independent Monitor Workspaces',
+        [int16]0x0752
+    )
+    if (-not (Test-Path -LiteralPath $shortcutPath) -or
+        -not (Test-Path -LiteralPath $recoveryShortcutPath)) {
+        throw 'Windows did not create the Startup and recovery shortcuts.'
     }
 }
 function Get-ConfiguredRuntime {
@@ -335,6 +469,8 @@ function Start-WorkspaceScript {
         [Parameter(Mandatory = $true)][string]$ScriptPath
     )
 
+    $RuntimePath = Resolve-PhysicalFilePath -Path $RuntimePath
+    $ScriptPath = Resolve-PhysicalFilePath -Path $ScriptPath
     $process = Start-Process -FilePath $RuntimePath -ArgumentList ('"' + $ScriptPath + '"') -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 800
     $process.Refresh()
@@ -438,6 +574,7 @@ try {
     Write-Host ''
     Write-Host 'Independent Monitor Workspaces is installed.' -ForegroundColor Green
     Write-Host 'Point at a monitor and press Win+Ctrl+Left or Win+Ctrl+Right.'
+    Write-Host 'Recovery launch: Ctrl+Alt+Shift+R (works even if the engine stopped).'
     Write-Host 'Emergency reset: Win+Ctrl+Shift+Esc.'
     Write-Host "Installed script: $installedScript"
     if ($runtimeWasBundled) {

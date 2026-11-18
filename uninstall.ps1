@@ -3,6 +3,7 @@
 param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'IndependentMonitorWorkspaces'),
     [string]$StartupDirectory = ([Environment]::GetFolderPath('Startup')),
+    [string]$RecoveryShortcutDirectory = ([Environment]::GetFolderPath('Programs')),
     [switch]$NoStartup
 )
 
@@ -10,6 +11,11 @@ $ErrorActionPreference = 'Stop'
 $installedScript = Join-Path $InstallRoot 'IndependentMonitorWorkspaces.ahk'
 $shortcutPath = Join-Path $StartupDirectory 'Independent Monitor Workspaces.lnk'
 $fallbackStartupPath = Join-Path $StartupDirectory 'Independent Monitor Workspaces.cmd'
+$recoveryShortcutPath = Join-Path $RecoveryShortcutDirectory 'Independent Monitor Workspaces Recovery Hotkey 2.lnk'
+$legacyRecoveryShortcutPaths = @(
+    (Join-Path $RecoveryShortcutDirectory 'Independent Monitor Workspaces Recovery.lnk'),
+    (Join-Path $RecoveryShortcutDirectory 'Independent Monitor Workspaces Recovery Hotkey.lnk')
+)
 $bundledRuntime = Test-Path -LiteralPath (Join-Path $InstallRoot 'runtime\AutoHotkey.exe')
 $metadataPath = Join-Path $InstallRoot 'install.json'
 if (Test-Path -LiteralPath $metadataPath) {
@@ -20,14 +26,60 @@ if (Test-Path -LiteralPath $metadataPath) {
     }
 }
 
+function Resolve-PhysicalFilePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not ('IndependentMonitorWorkspaces.UninstallerPhysicalPath' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace IndependentMonitorWorkspaces {
+    public static class UninstallerPhysicalPath {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            IntPtr file, StringBuilder path, uint pathLength, uint flags);
+        public static string Resolve(string path) {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete)) {
+                StringBuilder result = new StringBuilder(32768);
+                uint length = GetFinalPathNameByHandle(
+                    stream.SafeFileHandle.DangerousGetHandle(), result,
+                    (uint)result.Capacity, 0);
+                if (length == 0 || length >= result.Capacity)
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                string finalPath = result.ToString();
+                if (finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                    return @"\\" + finalPath.Substring(8);
+                if (finalPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                    return finalPath.Substring(4);
+                return finalPath;
+            }
+        }
+    }
+}
+"@
+    }
+    return [IndependentMonitorWorkspaces.UninstallerPhysicalPath]::Resolve($Path)
+}
+
 function Get-WorkspaceProcesses {
     param([Parameter(Mandatory = $true)][string]$ScriptPath)
 
     $comparisonPath = [IO.Path]::GetFullPath($ScriptPath)
+    $comparisonPaths = @($comparisonPath)
+    if (Test-Path -LiteralPath $comparisonPath) {
+        try {
+            $physicalPath = Resolve-PhysicalFilePath -Path $comparisonPath
+            if ($physicalPath -ne $comparisonPath) { $comparisonPaths += $physicalPath }
+        } catch { }
+    }
     return @(Get-CimInstance Win32_Process -Filter "Name LIKE 'AutoHotkey%.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine.IndexOf($comparisonPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $commandLine = $_.CommandLine
+            $commandLine -and @($comparisonPaths | Where-Object {
+                $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            }).Count -gt 0
         })
 }
 
@@ -82,6 +134,10 @@ if (Test-Path -LiteralPath $installedScript) {
 if (-not $NoStartup) {
     Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fallbackStartupPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $recoveryShortcutPath -Force -ErrorAction SilentlyContinue
+    foreach ($legacyPath in $legacyRecoveryShortcutPaths) {
+        Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 if (Test-Path -LiteralPath $InstallRoot) {
