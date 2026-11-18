@@ -25,7 +25,7 @@ DetectHiddenWindows true
 SetWinDelay -1
 try {
     TestSelfHiddenWindows()
-    FileAppend("Self-hidden window tests passed (save flags, restart, legacy state, release after visit).`n", "*")
+    FileAppend("Self-hidden window tests passed (save flags, restart, legacy state, release after visit, reopen in place).`n", "*")
     ExitApp(0)
 } catch as caughtError {
     FileAppend("FAIL: " caughtError.Message " at line " caughtError.Line "`n", "*")
@@ -91,6 +91,18 @@ TestSelfHiddenWindows() {
         AssertSelfHidden(!HiddenByScript.Has(popup.Hwnd) && !IsVisible(popup.Hwnd),
             "an app-hidden window is released after a visit")
         AssertSelfHidden(IsVisible(parked.Hwnd), "shown windows are unaffected")
+
+        ; Back on D1, popup's app opens it again, as Telegram reuses one hidden
+        ; media viewer. It opens on D1 instead of switching the monitor to D2.
+        CurrentWorkspace[monitor] := 1
+        popup.Show("x400 y40 w160 h120")
+        AssertSelfHidden(QueueExternalWorkspaceActivation(popup.Hwnd, "test"),
+            "the reopened window's activation is handled")
+        ProcessPendingExternalActivations()
+        AssertSelfHidden(CurrentWorkspace[monitor] = 1,
+            "an app reopening its own hidden window switched the monitor")
+        AssertSelfHidden(WindowWorkspace[popup.Hwnd].workspace = 1 && IsVisible(popup.Hwnd),
+            "a reopened window joins the current workspace")
     } finally {
         for fixture in [shown, trayApp, parked, popup, legacy]
             fixture.Destroy()

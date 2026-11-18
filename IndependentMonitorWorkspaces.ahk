@@ -6,7 +6,7 @@ Persistent
 ; This intentionally stays on one native Windows virtual desktop and emulates
 ; independent desktops by showing/hiding only the windows on the selected monitor.
 
-APP_VERSION := "1.2.23"
+APP_VERSION := "1.2.24"
 WORKSPACE_COUNT := 3
 SHOW_FEEDBACK := true
 WORKSPACE_SLIDE_MS := 340
@@ -1556,6 +1556,27 @@ ProcessPendingExternalActivations(*) {
             }
             SetTimer(ActivateOverviewWindow.Bind(
                 hwnd, slot.monitor, slot.workspace, 0), -20)
+            continue
+        }
+
+        ; The engine hides every window it parks on another workspace. One it
+        ; never hid was hidden by its own app, like Telegram's reused media
+        ; viewer or a tray app, and the app is opening it again now. It opens
+        ; where the user is, as a new window would.
+        if !HiddenByScript.Has(hwnd) {
+            monitor := GetWindowMonitor(hwnd)
+            if !CurrentWorkspace.Has(monitor)
+                monitor := slot.monitor
+            workspace := CurrentWorkspace[monitor]
+            WindowWorkspace[hwnd] := {monitor: monitor, workspace: workspace}
+            PromoteWorkspaceWindow(monitor, workspace, hwnd)
+            InvalidateWorkspaceFrame(slot.monitor, slot.workspace)
+            InvalidateWorkspaceFrame(monitor, workspace)
+            ScheduleWorkspaceStateSave()
+            DebugLog("EXTERNAL_ACTIVATION_REOPEN", "source=" request.source
+                " fromMonitor=" slot.monitor " fromWorkspace=D" slot.workspace
+                " toMonitor=" monitor " toWorkspace=D" workspace
+                " " DebugDescribeWindow(hwnd))
             continue
         }
 

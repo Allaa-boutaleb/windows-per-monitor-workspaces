@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.24 - 2026-11-17
+
+- Open a window its app hid and shows again, like Telegram's media viewer or a tray app, on the workspace the user is on. Telegram reuses one hidden viewer for every photo, so opening a photo switched the monitor to whichever workspace the viewer was first seen on
+- Add a reopen case to the self-hidden window test
+
 ## 1.2.23 - 2026-11-10
 
 - Remember a monitor's windows when it disconnects, as when its input is switched to a game console, and put them back when it returns. Any display change used to reveal every hidden window on every monitor and reset all monitors to D1
